@@ -20,6 +20,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -35,6 +37,7 @@ import dev.patrickgold.jetpref.datastore.ui.ExperimentalJetPrefDatastoreUi
 import dev.patrickgold.jetpref.datastore.ui.ListPreference
 import dev.patrickgold.jetpref.datastore.ui.PreferenceGroup
 import dev.patrickgold.jetpref.datastore.ui.SwitchPreference
+import kotlinx.coroutines.launch
 import org.florisboard.lib.android.AndroidVersion
 import org.florisboard.lib.compose.pluralsRes
 import org.florisboard.lib.compose.stringRes
@@ -47,6 +50,7 @@ fun ClipboardScreen() = FlorisScreen {
 
     content {
         val context = LocalContext.current
+        val scope = rememberCoroutineScope()
         val clipboardManager by context.clipboardManager()
         val screenshotDetectionEnabled by prefs.clipboard.screenshotDetectionEnabled.collectAsState()
 
@@ -62,7 +66,9 @@ fun ClipboardScreen() = FlorisScreen {
             if (!granted) {
                 // User said no — flip the switch back off so the UI reflects
                 // reality instead of showing "on" with nothing running.
-                prefs.clipboard.screenshotDetectionEnabled.set(false)
+                scope.launch {
+                    prefs.clipboard.screenshotDetectionEnabled.set(false)
+                }
             }
             clipboardManager.maybeEnableScreenshotDetection()
         }
