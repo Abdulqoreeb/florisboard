@@ -49,6 +49,15 @@ class ScreenshotObserver(
 ) : ContentObserver(Handler(Looper.getMainLooper())) {
 
     private var registered = false
+    private var lastHandledId: Long = -1L
+    private var lastHandledAtMs: Long = 0L
+
+    // Two onChange() calls for the same row (insert, then metadata update)
+    // typically land within a few hundred ms of each other. Anything wider
+    // apart is treated as a genuinely new event even if the id repeats
+    // (unlikely, but MediaStore ids can theoretically be reused after a
+    // delete on some OEM ROMs).
+    private val dedupWindowMs = 3000L
 
     // Common relative-path fragments used by stock Android and most OEM
     // skins (MIUI, OneUI, ColorOS, etc.) for screenshots. Matched
@@ -84,6 +93,17 @@ class ScreenshotObserver(
         // Only care about row-level inserts (content://media/external/images/media/<id>),
         // not the bare table-level URI some OEMs also notify on.
         val id = tryOrNull { ContentUris.parseId(uri) } ?: return
+
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (id == lastHandledId && (now - lastHandledAtMs) < dedupWindowMs) {
+            // Same row fired again (e.g. the metadata-finalized update that
+            // follows the initial insert) — skip it, we already added this
+            // screenshot to history on the first notification.
+            return
+        }
+        lastHandledId = id
+        lastHandledAtMs = now
+
         checkAndHandle(uri, id)
     }
 
