@@ -16,12 +16,20 @@
 
 package dev.patrickgold.florisboard.app.settings.clipboard
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
+import android.os.Build
+import androidx.core.content.ContextCompat
 import dev.patrickgold.florisboard.R
 import dev.patrickgold.florisboard.app.enumDisplayEntriesOf
+import dev.patrickgold.florisboard.clipboardManager
 import dev.patrickgold.florisboard.ime.clipboard.CLIPBOARD_HISTORY_NUM_GRID_COLUMNS_AUTO
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
 import dev.patrickgold.florisboard.lib.compose.FlorisScreen
+import dev.patrickgold.jetpref.datastore.model.collectAsState
 import dev.patrickgold.jetpref.datastore.ui.DialogSliderPreference
 import dev.patrickgold.jetpref.datastore.ui.ExperimentalJetPrefDatastoreUi
 import dev.patrickgold.jetpref.datastore.ui.ListPreference
@@ -38,6 +46,44 @@ fun ClipboardScreen() = FlorisScreen {
     previewFieldVisible = true
 
     content {
+        val context = LocalContext.current
+        val clipboardManager by context.clipboardManager()
+        val screenshotDetectionEnabled by prefs.clipboard.screenshotDetectionEnabled.collectAsState()
+
+        val mediaPermission = if (Build.VERSION.SDK_INT >= 33) {
+            android.Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+
+        val permissionLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestPermission(),
+        ) { granted ->
+            if (!granted) {
+                // User said no — flip the switch back off so the UI reflects
+                // reality instead of showing "on" with nothing running.
+                prefs.clipboard.screenshotDetectionEnabled.set(false)
+            }
+            clipboardManager.maybeEnableScreenshotDetection()
+        }
+
+        // Whenever the preference flips to true, make sure we actually have
+        // permission — request it if not — then (re)register the observer.
+        // Whenever it flips to false, this just tears the observer down.
+        LaunchedEffect(screenshotDetectionEnabled) {
+            if (screenshotDetectionEnabled) {
+                val hasPermission = ContextCompat.checkSelfPermission(context, mediaPermission) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!hasPermission) {
+                    permissionLauncher.launch(mediaPermission)
+                } else {
+                    clipboardManager.maybeEnableScreenshotDetection()
+                }
+            } else {
+                clipboardManager.maybeEnableScreenshotDetection()
+            }
+        }
+
         SwitchPreference(
             prefs.clipboard.useInternalClipboard,
             title = stringRes(R.string.pref__clipboard__use_internal_clipboard__label),
@@ -157,6 +203,21 @@ fun ClipboardScreen() = FlorisScreen {
                 prefs.clipboard.clearPrimaryClipAffectsHistoryIfUnpinned,
                 title = stringRes(R.string.pref__clipboard__clear_primary_clip_affects_history_if_unpinned__label),
                 summary = stringRes(R.string.pref__clipboard__clear_primary_clip_affects_history_if_unpinned__summary),
+                enabledIf = { prefs.clipboard.historyEnabled isEqualTo true },
+            )
+
+            // --- Screenshot auto-detection -------------------------------
+            // The switch below just flips the stored preference like any
+            // other SwitchPreference. Actually starting/stopping the
+            // MediaStore observer, and asking for the READ_MEDIA_IMAGES /
+            // READ_EXTERNAL_STORAGE permission when the user turns this on,
+            // is handled by the LaunchedEffect + permission launcher above
+            // (see top of this Composable), which reacts to the preference
+            // value changing rather than being called from here directly.
+            SwitchPreference(
+                prefs.clipboard.screenshotDetectionEnabled,
+                title = "Detect screenshots automatically",
+                summary = "Add new screenshots to clipboard history without copying them manually. Requires photo access permission.",
                 enabledIf = { prefs.clipboard.historyEnabled isEqualTo true },
             )
         }

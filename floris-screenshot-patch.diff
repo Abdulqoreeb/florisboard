@@ -1,0 +1,208 @@
+diff --git a/.github/workflows/android.yml b/.github/workflows/android.yml
+index 69a0c76..4f10b3c 100644
+--- a/.github/workflows/android.yml
++++ b/.github/workflows/android.yml
+@@ -18,6 +18,7 @@ on:
+       - "ROADMAP.md"
+   pull_request:
+     branches: [ main ]
++  workflow_dispatch: {}
+ 
+ jobs:
+   build:
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 2196854..f5c036b 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -8,6 +8,15 @@
+     <!-- Permission needed to create notifications on devices running Android 13+ -->
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+ 
++    <!-- Permission needed for the optional "detect screenshots" clipboard
++          feature to watch MediaStore for newly-added screenshots. -->
++    <uses-permission
++        android:name="android.permission.READ_MEDIA_IMAGES"
++        android:minSdkVersion="33"/>
++    <uses-permission
++        android:name="android.permission.READ_EXTERNAL_STORAGE"
++        android:maxSdkVersion="32"/>
++
+     <!-- Android 11+ only: Define that FlorisBoard requests to see all apps that
+           ship with an IME or Spell Check service. This is used to guide the user
+           in the Settings Ui why FlorisBoard may not be working.
+diff --git a/app/src/main/kotlin/dev/patrickgold/florisboard/app/AppPrefs.kt b/app/src/main/kotlin/dev/patrickgold/florisboard/app/AppPrefs.kt
+index 839b0b8..29c84a4 100644
+--- a/app/src/main/kotlin/dev/patrickgold/florisboard/app/AppPrefs.kt
++++ b/app/src/main/kotlin/dev/patrickgold/florisboard/app/AppPrefs.kt
+@@ -101,6 +101,10 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
+             key = "clipboard__history_enabled",
+             default = false,
+         )
++        val screenshotDetectionEnabled = boolean(
++            key = "clipboard__screenshot_detection_enabled",
++            default = false,
++        )
+         val historyNumGridColumnsPortrait = int(
+             key = "clipboard__history_num_grid_columns_portrait",
+             default = CLIPBOARD_HISTORY_NUM_GRID_COLUMNS_AUTO,
+diff --git a/app/src/main/kotlin/dev/patrickgold/florisboard/app/settings/clipboard/ClipboardScreen.kt b/app/src/main/kotlin/dev/patrickgold/florisboard/app/settings/clipboard/ClipboardScreen.kt
+index 94c3553..3d304ad 100644
+--- a/app/src/main/kotlin/dev/patrickgold/florisboard/app/settings/clipboard/ClipboardScreen.kt
++++ b/app/src/main/kotlin/dev/patrickgold/florisboard/app/settings/clipboard/ClipboardScreen.kt
+@@ -16,12 +16,20 @@
+ 
+ package dev.patrickgold.florisboard.app.settings.clipboard
+ 
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.ui.platform.LocalContext
++import android.os.Build
++import androidx.core.content.ContextCompat
+ import dev.patrickgold.florisboard.R
+ import dev.patrickgold.florisboard.app.enumDisplayEntriesOf
++import dev.patrickgold.florisboard.clipboardManager
+ import dev.patrickgold.florisboard.ime.clipboard.CLIPBOARD_HISTORY_NUM_GRID_COLUMNS_AUTO
+ import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
+ import dev.patrickgold.florisboard.lib.compose.FlorisScreen
++import dev.patrickgold.jetpref.datastore.model.collectAsState
+ import dev.patrickgold.jetpref.datastore.ui.DialogSliderPreference
+ import dev.patrickgold.jetpref.datastore.ui.ExperimentalJetPrefDatastoreUi
+ import dev.patrickgold.jetpref.datastore.ui.ListPreference
+@@ -38,6 +46,44 @@ fun ClipboardScreen() = FlorisScreen {
+     previewFieldVisible = true
+ 
+     content {
++        val context = LocalContext.current
++        val clipboardManager by context.clipboardManager()
++        val screenshotDetectionEnabled by prefs.clipboard.screenshotDetectionEnabled.collectAsState()
++
++        val mediaPermission = if (Build.VERSION.SDK_INT >= 33) {
++            android.Manifest.permission.READ_MEDIA_IMAGES
++        } else {
++            android.Manifest.permission.READ_EXTERNAL_STORAGE
++        }
++
++        val permissionLauncher = rememberLauncherForActivityResult(
++            contract = ActivityResultContracts.RequestPermission(),
++        ) { granted ->
++            if (!granted) {
++                // User said no — flip the switch back off so the UI reflects
++                // reality instead of showing "on" with nothing running.
++                prefs.clipboard.screenshotDetectionEnabled.set(false)
++            }
++            clipboardManager.maybeEnableScreenshotDetection()
++        }
++
++        // Whenever the preference flips to true, make sure we actually have
++        // permission — request it if not — then (re)register the observer.
++        // Whenever it flips to false, this just tears the observer down.
++        LaunchedEffect(screenshotDetectionEnabled) {
++            if (screenshotDetectionEnabled) {
++                val hasPermission = ContextCompat.checkSelfPermission(context, mediaPermission) ==
++                    android.content.pm.PackageManager.PERMISSION_GRANTED
++                if (!hasPermission) {
++                    permissionLauncher.launch(mediaPermission)
++                } else {
++                    clipboardManager.maybeEnableScreenshotDetection()
++                }
++            } else {
++                clipboardManager.maybeEnableScreenshotDetection()
++            }
++        }
++
+         SwitchPreference(
+             prefs.clipboard.useInternalClipboard,
+             title = stringRes(R.string.pref__clipboard__use_internal_clipboard__label),
+@@ -159,6 +205,21 @@ fun ClipboardScreen() = FlorisScreen {
+                 summary = stringRes(R.string.pref__clipboard__clear_primary_clip_affects_history_if_unpinned__summary),
+                 enabledIf = { prefs.clipboard.historyEnabled isEqualTo true },
+             )
++
++            // --- Screenshot auto-detection -------------------------------
++            // The switch below just flips the stored preference like any
++            // other SwitchPreference. Actually starting/stopping the
++            // MediaStore observer, and asking for the READ_MEDIA_IMAGES /
++            // READ_EXTERNAL_STORAGE permission when the user turns this on,
++            // is handled by the LaunchedEffect + permission launcher above
++            // (see top of this Composable), which reacts to the preference
++            // value changing rather than being called from here directly.
++            SwitchPreference(
++                prefs.clipboard.screenshotDetectionEnabled,
++                title = "Detect screenshots automatically",
++                summary = "Add new screenshots to clipboard history without copying them manually. Requires photo access permission.",
++                enabledIf = { prefs.clipboard.historyEnabled isEqualTo true },
++            )
+         }
+     }
+ }
+diff --git a/app/src/main/kotlin/dev/patrickgold/florisboard/ime/clipboard/ClipboardManager.kt b/app/src/main/kotlin/dev/patrickgold/florisboard/ime/clipboard/ClipboardManager.kt
+index faa3b59..89e8597 100644
+--- a/app/src/main/kotlin/dev/patrickgold/florisboard/ime/clipboard/ClipboardManager.kt
++++ b/app/src/main/kotlin/dev/patrickgold/florisboard/ime/clipboard/ClipboardManager.kt
+@@ -98,6 +98,13 @@ class ClipboardManager(
+     private var clipHistoryDb: ClipboardHistoryDatabase? = null
+     private val clipHistoryDao: ClipboardHistoryDao? get() = clipHistoryDb?.clipboardItemDao()
+ 
++    // Screenshot auto-detection. Only actually registered if the user has
++    // both the feature preference enabled AND granted the media permission —
++    // see maybeEnableScreenshotDetection().
++    private val screenshotObserver = ScreenshotObserver(context) { item ->
++        insertOrMoveBeginning(item)
++    }
++
+     val historyFlow: StateFlow<ClipboardHistory>
+         field = MutableStateFlow(ClipboardHistory.EMPTY)
+     val currentHistory: ClipboardHistory
+@@ -115,6 +122,7 @@ class ClipboardManager(
+ 
+     init {
+         systemClipboardManager.addPrimaryClipChangedListener(this)
++        maybeEnableScreenshotDetection()
+         cleanUpJob = ioScope.launch {
+             while (isActive) {
+                 delay(INTERVAL)
+@@ -123,6 +131,34 @@ class ClipboardManager(
+         }
+     }
+ 
++    /**
++     * Registers [screenshotObserver] only if the user has turned the
++     * preference on AND the required media-read permission is currently
++     * granted. Safe to call repeatedly (e.g. after the user grants the
++     * permission or flips the setting) — it no-ops if already registered.
++     *
++     * Call this again from wherever the app handles the permission-request
++     * result, so detection turns on the moment permission is granted
++     * without requiring a keyboard restart.
++     */
++    fun maybeEnableScreenshotDetection() {
++        val enabled = prefs.clipboard.screenshotDetectionEnabled.get()
++        val hasPermission = org.florisboard.lib.android.AndroidVersion.let {
++            val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
++                android.Manifest.permission.READ_MEDIA_IMAGES
++            } else {
++                android.Manifest.permission.READ_EXTERNAL_STORAGE
++            }
++            androidx.core.content.ContextCompat.checkSelfPermission(appContext, permission) ==
++                android.content.pm.PackageManager.PERMISSION_GRANTED
++        }
++        if (enabled && hasPermission) {
++            screenshotObserver.register()
++        } else {
++            screenshotObserver.unregister()
++        }
++    }
++
+     fun initializeForContext(context: Context) {
+         ioScope.launch {
+             if (clipHistoryDb == null) {
+@@ -404,6 +440,7 @@ class ClipboardManager(
+      */
+     override fun close() {
+         systemClipboardManager.removePrimaryClipChangedListener(this)
++        screenshotObserver.unregister()
+         cleanUpJob.cancel()
+     }
+ }

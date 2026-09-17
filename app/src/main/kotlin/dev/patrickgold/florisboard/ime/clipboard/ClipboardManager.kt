@@ -98,6 +98,13 @@ class ClipboardManager(
     private var clipHistoryDb: ClipboardHistoryDatabase? = null
     private val clipHistoryDao: ClipboardHistoryDao? get() = clipHistoryDb?.clipboardItemDao()
 
+    // Screenshot auto-detection. Only actually registered if the user has
+    // both the feature preference enabled AND granted the media permission —
+    // see maybeEnableScreenshotDetection().
+    private val screenshotObserver = ScreenshotObserver(context) { item ->
+        insertOrMoveBeginning(item)
+    }
+
     val historyFlow: StateFlow<ClipboardHistory>
         field = MutableStateFlow(ClipboardHistory.EMPTY)
     val currentHistory: ClipboardHistory
@@ -115,11 +122,40 @@ class ClipboardManager(
 
     init {
         systemClipboardManager.addPrimaryClipChangedListener(this)
+        maybeEnableScreenshotDetection()
         cleanUpJob = ioScope.launch {
             while (isActive) {
                 delay(INTERVAL)
                 enforceExpiryDate(currentHistory)
             }
+        }
+    }
+
+    /**
+     * Registers [screenshotObserver] only if the user has turned the
+     * preference on AND the required media-read permission is currently
+     * granted. Safe to call repeatedly (e.g. after the user grants the
+     * permission or flips the setting) — it no-ops if already registered.
+     *
+     * Call this again from wherever the app handles the permission-request
+     * result, so detection turns on the moment permission is granted
+     * without requiring a keyboard restart.
+     */
+    fun maybeEnableScreenshotDetection() {
+        val enabled = prefs.clipboard.screenshotDetectionEnabled.get()
+        val hasPermission = org.florisboard.lib.android.AndroidVersion.let {
+            val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                android.Manifest.permission.READ_MEDIA_IMAGES
+            } else {
+                android.Manifest.permission.READ_EXTERNAL_STORAGE
+            }
+            androidx.core.content.ContextCompat.checkSelfPermission(appContext, permission) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (enabled && hasPermission) {
+            screenshotObserver.register()
+        } else {
+            screenshotObserver.unregister()
         }
     }
 
@@ -404,6 +440,7 @@ class ClipboardManager(
      */
     override fun close() {
         systemClipboardManager.removePrimaryClipChangedListener(this)
+        screenshotObserver.unregister()
         cleanUpJob.cancel()
     }
 }

@@ -101,6 +101,10 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
             key = "clipboard__history_enabled",
             default = false,
         )
+        val screenshotDetectionEnabled = boolean(
+            key = "clipboard__screenshot_detection_enabled",
+            default = false,
+        )
         val historyNumGridColumnsPortrait = int(
             key = "clipboard__history_num_grid_columns_portrait",
             default = CLIPBOARD_HISTORY_NUM_GRID_COLUMNS_AUTO,
